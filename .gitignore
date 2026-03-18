@@ -1,0 +1,8 @@
+checkpoints
+data/*
+logs
+monai_cache
+utils
+wandb
+FLORA/*.sif
+*.pyc

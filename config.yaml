@@ -1,0 +1,10 @@
+
+kl_weight: 0.01
+adv_weight: 0.1
+perceptual_weight: 0.01
+lambda_weight: 0.1
+bank_size: 64
+generator_lr: 5e-4
+discriminator_lr: 1e-5
+fft_weight: 0.1
+gradient_weight: 0.1
