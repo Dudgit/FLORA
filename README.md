@@ -12,5 +12,5 @@ The detector informations (scattering angles and energy loss) are coming in a la
 
 ## Results
 The results of stage 1 looks extremly promising.
-![FLORA Stage 1](utils/eval_outputs/sample_5_cond_2-4.png)
+![FLORA Stage 1](res.png)
 The discriminator setup clearly forced the model to not just average out pixel values but to learn biological structures. We are currently running the particle scattering simulations to start stage 2.
