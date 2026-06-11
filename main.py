@@ -61,6 +61,9 @@ def train():
         print("Starting fresh training run...")
         trainer.fit(model, train_loader, val_loader)
 
+
+
+
 if __name__ == "__main__":
     
     train()

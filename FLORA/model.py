@@ -28,14 +28,14 @@ def gradient_loss_3d(recon, target):
 
 
 default_vae_kwargs = {
-    "spatial_dims": 3,
+    "spatial_dims": 3,      # <--- Make sure this is 3! (Not 4)
     "in_channels": 1,
     "out_channels": 1,
     "num_res_blocks": 2,
-    #"latent_channels": 16,
+    "latent_channels": 4,   # <--- This is the one that should be 4
     "attention_levels": (False, False, False, True),
     "norm_num_groups": 32,
-    }
+}
 
 default_disc_kwargs = {
     "spatial_dims": 3,

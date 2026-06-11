@@ -1,0 +1,17 @@
+Material,HU,RSP,RSP_std
+Air ,-1050,0.0,0.0
+Lung,-950,0.499, 0.330
+Adipose,-120,0.955,0.003
+SoftTissus,19,1.038,0.003
+ConnectiveTissue,80,1.058,0.003
+Marrow_Bone02,200,1.127,0.003
+Marrow_Bone03,300,1.153,0.003
+Marrow_Bone05,500,1.217,0.003
+Marrow_Bone07,700,1.28,0.004
+Marrow_Bone09,900,1.344,0.003
+Marrow_Bone11,1100,1.409,0.004
+Marrow_Bone14,1400,1.511,0.005
+Marrow_Bone15,1500,1.542,0.004
+AmalgamTooth,1640,1.602,0.013
+MetallImplants,2300,2.125,0.015
+MetallImplants,3000,3.162,0.022
