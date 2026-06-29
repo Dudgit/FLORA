@@ -1,16 +1,27 @@
-# FLORA AI
-Flow-based Latent-informed Optimization for 3D proton-CT Reconstruction with Spatial Attention
+# CT to RSP Conversion with Deep Learning: A Latent Flow-Matching Approach
 
-## Proton Computed Tomography
-An alternative of traditional radiotherapy is hadron therapy, which utilizes the energy deposition of protons (or carbon ions), which can concentrate  more on the malignant part (the tumor). This method sounds good, but current medical devices are not able to measure what would be the possible stopping powers applied on the protons as they pass through the patient. The goal of this project to make a generative AI based pipeline that can reconstruct the proton-relative stopping power (RSP), which can be used treatment planning.
+**Anonymous Submission — MICCAI SASHIMI 2026**
 
-## Methods
-Similarly to many 3D image generation models we are using a 2 stage pipeline. The first stage a simple VAE-GAN to learn a good medical image representation, inspired by NVIDIA MAISI. Additionally we force latent space to mimic medical conditions. This way at stage 2 we can start to reconstruct our 3D images from the latent space of the specific medical condition and only condition in detector data.
-![FLORA Pipeline](flora_1.png)
 
-The detector informations (scattering angles and energy loss) are coming in a large quantity so we convert them into multivariate-gaussians and project them into latent space. In the latent space we  convert the initial image with the particle scattering conditioning and spatial attention. The reasoning behind it is that protons don't directly pass through the materials, but they suffer scattering. This means that the final angle and energy loss of the particle is not give us information of the slice but for some extent its environment.
+This repository contains the reference implementation for our SASHIMI 2026 workshop submission. The project introduces a two-stage deep learning framework that performs continuous transformation from X-ray Computed Tomography (CT) into Relative Stopping Power (RSP) volumes entirely within a compressed latent space.
 
-## Results
-The results of stage 1 looks extremly promising.
-![FLORA Stage 1](res.png)
-The discriminator setup clearly forced the model to not just average out pixel values but to learn biological structures. We are currently running the particle scattering simulations to start stage 2.
+*Note: This codebase is currently under active development. The scripts provided here are intended for peer-review transparency and methodology verification.*
+
+## Project Overview
+
+Accurate estimation of RSP is critical for proton therapy treatment planning. Current clinical standards rely on stoichiometric lookup tables (HLUT), which introduce range uncertainties, particularly in highly heterogeneous, low-density regions like lung tissue. 
+
+This project bypasses voxel-space translation by modeling the CT-to-RSP relationship as a continuous transport problem in a latent manifold.
+
+### The Pipeline
+
+The architecture consists of two primary stages:
+
+1. **Stage I: Latent Representation Learning (VAE-GAN)**
+   Inspired by the MAISI architecture, we train a high-capacity 3D autoencoder to compress volumetric CT and RSP data into a dense, high-quality latent representation. This preserves structural fidelity while significantly reducing computational overhead.
+2. **Stage II: Latent Flow Matching**
+   With frozen autoencoder weights, a conditional flow-matching network learns the deterministic velocity field to transport a CT latent state to its corresponding RSP latent state. This enables efficient inference and naturally supports the integration of auxiliary conditional data (e.g., proton detector measurements). The final goal is to do include this to obtain the highest possible accuracy and the best possible dosage delivery.
+
+##  Dataset
+
+A major bottleneck in CT-to-RSP modeling is the lack of paired in-vivo ground truth. To address this, we constructed a biologically plausible dataset using the public CT-RATE dataset and Monte Carlo simulations (OpenGATE). For submission we used 36 increments for every slice, yet we are constructing a much better resolution. Due to the simulation time and only-CPU implementation, this takes a huge amount of time.
