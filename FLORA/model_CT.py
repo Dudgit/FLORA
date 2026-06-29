@@ -112,6 +112,9 @@ class FLORA_CT_changedBlock(pl.LightningModule):
         self.lr = lr
         self.use_detector_context = use_detector_context
         self.use_cfg = use_cfg
+        if not use_detector_context:
+            velocity_kwargs = dict(velocity_kwargs)
+            velocity_kwargs['in_channels'] = 4
         self.velocity_net = DiffusionModelUNet(**velocity_kwargs)
         self.register_buffer("latent_scale",torch.tensor(11.1560))
         mean_tensor = torch.tensor([0.008381759747862816, 0.020576655864715576, 0.03292844071984291, 0.0516696535050869, 0.07965941727161407, 0.14866508543491364, 0.455157071352005, 167.81105041503906, 174.27532958984375, 177.35848999023438, 180.73336791992188, 184.35720825195312, 187.68963623046875, 226.7608642578125, 0.04672469571232796, 6.969912528991699, 0.07428985834121704, 0.002276827348396182, 3.0780694484710693, 6.565859317779541, 0.7064194679260254])
@@ -142,18 +145,23 @@ class FLORA_CT_changedBlock(pl.LightningModule):
         z_t = t_expand * z_1 + (1.0 - t_expand) * z_0
         target_velocity = z_1 - z_0
         if self.use_detector_context:
-            print(f"z_t shape: {z_t.shape}, context shape: {context.shape}")
             z_t_conditioned = torch.cat([z_t, context], dim=1)
             pred_velocity = self.velocity_net(x=z_t_conditioned, timesteps=t)
         else:
             pred_velocity = self.velocity_net(x=z_t, timesteps=t)
         
+        error = (pred_velocity - target_velocity) ** 2
+        with torch.no_grad():
+            density_weight = 1.0 + torch.abs(z_1) / (z_1.abs().mean() + 1e-8)
+        weighted_error = error * density_weight
+        fm_loss = weighted_error.mean()
+
         #Calculating Loss
         loss_per_sample = F.mse_loss(pred_velocity, target_velocity, reduction='none')
         loss_per_sample = loss_per_sample.mean(dim=[1, 2, 3, 4])
         self.health_losses(loss_per_sample,t)
         
-        fm_loss = F.mse_loss(pred_velocity, target_velocity)
+        #fm_loss = F.mse_loss(pred_velocity, target_velocity)
         
         return fm_loss
     
@@ -169,15 +177,6 @@ class FLORA_CT_changedBlock(pl.LightningModule):
         self.log("health/loss_t_early", early_loss, sync_dist=True, prog_bar=False)
         self.log("health/loss_t_mid", mid_loss, sync_dist=True, prog_bar=False)
         self.log("health/loss_t_late", late_loss, sync_dist=True, prog_bar=False)
-
-    def cfg_prep(self,cond_seq,B):
-        cfg_dropout_prob = 0.15
-        drop_mask = torch.rand(B, device=self.device) < cfg_dropout_prob
-        mask_labels = drop_mask.view(B, *([1] * (medical_labels.ndim - 1)))
-        medical_labels = torch.where(mask_labels, torch.zeros_like(medical_labels), medical_labels)
-        mask_seq = drop_mask.view(B, 1, 1)
-        cond_seq = torch.where(mask_seq, torch.zeros_like(cond_seq), cond_seq)
-        return cond_seq
 
     
     def shared_step(self, batch, batch_idx, stage="train"):

@@ -15,7 +15,6 @@ class Evaluator():
         self.device = device
         self.ode_steps = ode_steps
         
-        # Initialize MONAI 3D Metrics on the evaluation device
         self.ssim_metric = SSIMMetric(data_range=2.5, spatial_dims=3)
         self.psnr_metric = PSNRMetric(max_val=2.5)
         self.cfg_scale = cfg_scale
@@ -24,37 +23,30 @@ class Evaluator():
         """
         Evaluates a single batch using the model checkpoint and returns physical metrics.
         """
-        # 1. Setup Data and move to designated evaluation device
         slab = batch["rsp"][0:1].to(self.device)
         physics_grid = batch["physics_grid"][0:1].to(self.device)
         medical_labels = batch["condition"][0:1].to(self.device)
 
-        # Build condition label string for tracking/file names
         active_indices = torch.where(medical_labels[0] == 1)[0].tolist()
         cond_str = f"Conds_{active_indices}" if active_indices else "Healthy"
 
         with torch.no_grad():
             model.eval()
 
-            # Find the true spatial target dimension of the VAE latent space
             z_mu, _ = model.vae.encode(slab)
             spatial_shape = z_mu.shape[2:]
 
-            # --- Run Reconstruction Generation ---
             model.load_state_dict(vanilla_sd, strict=False)
             
             recon_vanilla = self.solve_ode_Heun(
                 model, physics_grid, medical_labels, spatial_shape
             )
             
-            # Compute MONAI Metrics (Calculates and appends to internal accumulation buffers)
             van_ssim = self.ssim_metric(recon_vanilla, slab).mean().item()
             van_psnr = self.psnr_metric(recon_vanilla, slab).mean().item()
             
-            # CRITICAL: Reset accumulation buffers to prevent massive memory leaks during loops
             self.ssim_metric.reset()
             self.psnr_metric.reset()
-        # 2. Process volumes to standard NumPy arrays for plotting/saving
         slab_cpu = slab.squeeze(0).cpu().numpy()
         vanilla_cpu = recon_vanilla.squeeze(0).cpu().numpy()
         return {"ssim": van_ssim,"psnr": van_psnr,"volumes": (slab_cpu, vanilla_cpu)}
@@ -67,7 +59,6 @@ class Evaluator():
         B = physics_grid.shape[0]
         device = physics_grid.device
         
-        # 1. Process Conditioning (The Physics Grid)
         scaled_physics_grid = (physics_grid - pl_module.cond_mean) / pl_module.cond_std
         cond_features = pl_module.projection_mlp(scaled_physics_grid)
         
@@ -75,28 +66,23 @@ class Evaluator():
             cond_features = cond_features.squeeze(1)
         cond_seq = cond_features.view(B, -1, cond_features.shape[-1])
         
-        # Generate Unconditional Sequence for CFG (Pure Zeros)
         if self.cfg_scale > 1.0:
             uncond_seq = torch.zeros_like(cond_seq)
         
-        # 2. Get the Starting Prior (Ghost + Noise)
         x_t = pl_module.generate_informed_x0(medical_labels, spatial_shape)
         
-        # 3. Heun Integration Loop from t=0 to t=1
         dt = 1.0 / self.ode_steps
         
         for i in range(self.ode_steps):
-            # Time tensors for current and next step
+
             t_current = i * dt
             t_next = (i + 1) * dt
             
-            # MONAI expects 0-1000 scale
+
             t_current_scaled = torch.full((B,), t_current * 1000.0, device=device)
             t_next_scaled = torch.full((B,), t_next * 1000.0, device=device)
             
-            # ==========================================
-            # STEP 1: The Predictor (v1)
-            # ==========================================
+
             if self.cfg_scale > 1.0:
                 v1_cond = pl_module.velocity_net(x=x_t, timesteps=t_current_scaled, context=cond_seq)
                 v1_uncond = pl_module.velocity_net(x=x_t, timesteps=t_current_scaled, context=uncond_seq)
@@ -104,17 +90,13 @@ class Evaluator():
             else:
                 v1 = pl_module.velocity_net(x=x_t, timesteps=t_current_scaled, context=cond_seq)
             
-            # Take a temporary Euler step to peek into the future
             x_euler = x_t + v1 * dt
             
-            # If we are at the very last step, no need to correct. Just finish!
             if i == self.ode_steps - 1:
                 x_t = x_euler
                 break
                 
-            # ==========================================
-            # STEP 2: The Corrector (v2)
-            # ==========================================
+
             if self.cfg_scale > 1.0:
                 v2_cond = pl_module.velocity_net(x=x_euler, timesteps=t_next_scaled, context=cond_seq)
                 v2_uncond = pl_module.velocity_net(x=x_euler, timesteps=t_next_scaled, context=uncond_seq)
@@ -122,13 +104,10 @@ class Evaluator():
             else:
                 v2 = pl_module.velocity_net(x=x_euler, timesteps=t_next_scaled, context=cond_seq)
                 
-            # ==========================================
-            # STEP 3: The Heun Update
-            # ==========================================
+
             x_t = x_t + (dt / 2.0) * (v1 + v2)
             
-        # 4. Decode the final latent (x1) back into a 3D physical volume
-        # IMPORTANT: Do not forget to divide by the latent scale before decoding!
+
         scale = getattr(pl_module, "latent_scale", 1.0)
         recon_volume = pl_module.vae.decode(x_t / scale)
         
@@ -176,12 +155,9 @@ def apply_clinical_hlut_old(ct_hu_tensor):
     rsp_means = HU_to_RSP['RSP'].values.astype(np.float32)
     rsp_stds = HU_to_RSP['RSP_std'].values.astype(np.float32)
     
-    # --- 1. Find Bins ---
     indices = np.digitize(hu_arr, bins) - 1
     indices[indices < 0] = 0
-    # --- 2. Create Base Mean Map ---
     mean_map = rsp_means[indices]
-    # --- 3. Create STD Map ---
     std_map = rsp_stds[indices]
     noise = np.random.normal(loc=0.0, scale=1.0, size=hu_arr.shape).astype(np.float32)
     final_rsp = mean_map
@@ -190,7 +166,6 @@ def apply_clinical_hlut_old(ct_hu_tensor):
 
 
 def apply_clinical_hlut(ct_normalized_tensor, a_min=-1000.0, a_max=3000.0):
-    # Denormalize back to HU first
     ct_hu = ct_normalized_tensor * (a_max - a_min) + a_min
     hu_arr = ct_hu.cpu().numpy()
     
@@ -208,7 +183,6 @@ class FlowEvaluator():
         self.ode_steps = ode_steps
         self.rsp_max_scale = rsp_max_scale 
         
-        # Initialize MONAI 3D Metrics with explicit data ranges
         self.ssim_metric = SSIMMetric(data_range=1.0, spatial_dims=3)
         self.psnr_metric = PSNRMetric(max_val=1.0)
         
@@ -217,11 +191,8 @@ class FlowEvaluator():
         Creates a binary mask to isolate the patient's body contour.
         Excludes background air and optionally truncates the CT bed at the bottom.
         """
-        # Step 1: Threshold out the ambient air noise
         mask = (gt_volume > air_threshold).float()
-        
-        # Step 2: Optionally cut off the bottom rows if the bed is inflating errors
-        # Expects shape [B, C, H, W, D]
+
         if remove_bed_height is not None:
             H = mask.shape[2]
             cut_idx = int(H * remove_bed_height)
@@ -235,7 +206,6 @@ class FlowEvaluator():
         """
         Evaluates a single batch on BOTH models + Clinical HLUT inside the true patient contour or full volume.
         """
-        # 1. Setup Data
         ct = batch["ct"][0:1].to(self.device)
         gt_rsp = batch["rsp"][0:1].to(self.device)
         physics_grid = batch["physics_grid"][0:1].to(self.device)
@@ -244,32 +214,22 @@ class FlowEvaluator():
             model_baseline.eval()
             model_detector.eval()
 
-            # Generate the true patient mask from the ground truth volume conditionally
-            if use_masking:
-                # If the bed is visible at the bottom 15% of the vertical height, pass remove_bed_height=0.85
-                patient_mask = self.generate_patient_mask(gt_rsp, air_threshold=0.0, remove_bed_height=None)
-            else:
-                # If masking is off, evaluate the entire 3D volume (all voxels are active)
-                patient_mask = torch.ones_like(gt_rsp)
+        
+            solver_fn = self.solve_flow_Euler 
 
-            # Choose solver dynamically
-            solver_fn = self.solve_flow_Euler #if method == "euler"# else self.solve_flow_Heun
-
-            # --- 2. Run Pure Conditioned Inference & Clinical Heuristic ---
             pred_baseline = solver_fn(model_baseline, ct, context_grid=None)
             pred_detector = solver_fn(model_detector, ct, context_grid=physics_grid)
             
-            # Compute external clinical HLUT curve baseline
-            # Note: Ensure apply_clinical_hlut matches the normalized output range [0, 1] of your network
             pred_hlut = apply_clinical_hlut(ct)
+            physical_gt = gt_rsp * self.rsp_max_scale
+            patient_mask = ((physical_gt > 1.038 + 0.003)).float()  # High density
             
-            # --- 3. Apply Patient Mask to Predictions & Ground Truth ---
             masked_gt = gt_rsp * patient_mask  
             masked_base = pred_baseline * patient_mask  
             masked_det = pred_detector * patient_mask  
             masked_hlut = pred_hlut * patient_mask
-            hlut_normalized = torch.clamp(masked_hlut / self.rsp_max_scale, 0.0, 1.0) #/ self.rsp_max_scale
-            # --- 4. Compute Structural Metrics Inside/Outside Mask ---
+            hlut_normalized = torch.clamp(masked_hlut / self.rsp_max_scale, 0.0, 1.0) 
+
             base_ssim = self.ssim_metric(masked_base, masked_gt).mean().item()
             det_ssim = self.ssim_metric(masked_det, masked_gt).mean().item()
             hlut_ssim = self.ssim_metric(hlut_normalized, masked_gt).mean().item()
@@ -280,21 +240,11 @@ class FlowEvaluator():
             hlut_psnr = self.psnr_metric(hlut_normalized, masked_gt).mean().item()
             self.psnr_metric.reset()
             
-            # --- 5. Compute Physical MAE (Unscaled [0, 3.2] RSP) ---
             physical_gt = masked_gt * self.rsp_max_scale
             physical_base = masked_base * self.rsp_max_scale
             physical_det = masked_det * self.rsp_max_scale
-            physical_hlut = masked_hlut #* self.rsp_max_scale
+            physical_hlut = masked_hlut 
 
-            #base_ssim = self.ssim_metric(physical_base, physical_gt).mean().item()
-            #det_ssim = self.ssim_metric(physical_det, physical_gt).mean().item()
-            #self.ssim_metric.reset()
-            #
-            #base_psnr = self.psnr_metric(physical_base, physical_gt).mean().item()
-            #det_psnr = self.psnr_metric(physical_det, physical_gt).mean().item()
-            #self.psnr_metric.reset()
-            
-            # Calculate mean only where the mask is active
             num_tissue_voxels = patient_mask.sum()
             if num_tissue_voxels > 0:
                 base_mae = (torch.abs(physical_base - physical_gt).sum() / num_tissue_voxels).item()
@@ -303,7 +253,6 @@ class FlowEvaluator():
             else:
                 base_mae, det_mae, hlut_mae = 0.0, 0.0, 0.0
 
-        # 6. Process volumes to standard NumPy arrays for plotting
         return {
             "metrics": {
                 "HLUT_SSIM": hlut_ssim,
@@ -316,13 +265,14 @@ class FlowEvaluator():
                 
                 "HLUT_MAE_RSP": hlut_mae,
                 "Baseline_MAE_RSP": base_mae, 
-                "Detector_MAE_RSP": det_mae
+                "Detector_MAE_RSP": det_mae,
+    
             },
             "volumes": (
                 ct.squeeze(0).cpu().numpy(), 
-                gt_rsp.squeeze(0).cpu().numpy(), 
-                pred_baseline.squeeze(0).cpu().numpy(), 
-                pred_detector.squeeze(0).cpu().numpy(),
+                physical_gt.squeeze(0).cpu().numpy(), 
+                physical_base.squeeze(0).cpu().numpy(), 
+                physical_hlut.squeeze(0).cpu().numpy(),
             )
         }
 
@@ -333,7 +283,6 @@ class FlowEvaluator():
         z_0, _ = pl_module.vae.encode(ct_images)
         z_t = z_0 * pl_module.latent_scale
         
-        # Cleaned context pipeline: Pure conditioning, no unconditional states
         if context_grid is not None and pl_module.use_detector_context:
             context_grid = (context_grid - pl_module.cond_mean) / pl_module.cond_std
             cond_features = pl_module.projection_mlp(context_grid)
@@ -345,7 +294,6 @@ class FlowEvaluator():
         for i in range(self.ode_steps):
             t_curr_tensor = torch.full((B,), i * dt, device=device)
             
-            # Straight inference pass
             v = pl_module.velocity_net(x=z_t, timesteps=t_curr_tensor, context=cond_seq)
             z_t = z_t + v * dt
             
@@ -355,20 +303,136 @@ class FlowEvaluator():
         return recon_volume
     
 
+
+class VAEEvaluator:
+    """
+    Evaluates VAE reconstruction quality on the validation set.
+ 
+    Answers the question: how much quality does the VAE compression lose?
+    All metrics are computed in physical RSP space [0, 3.2] for MAE/MSE,
+    and normalized [0, 1] space for SSIM/PSNR — consistent with FlowEvaluator.
+ 
+    Metrics:
+        MAE   — mean absolute error in RSP units (clinically interpretable)
+        MSE   — mean squared error in RSP units  (penalizes large errors more)
+        PSNR  — peak signal-to-noise ratio        (standard image quality)
+        SSIM  — structural similarity             (perceptual quality)
+    """
+ 
+    def __init__(self, device, rsp_max_scale=3.2):
+        self.device         = device
+        self.rsp_max_scale  = rsp_max_scale
+ 
+        self.ssim_metric = SSIMMetric(data_range=1.0, spatial_dims=3)
+        self.psnr_metric = PSNRMetric(max_val=1.0)
+ 
+    @torch.no_grad()
+    def evaluate_batch(self, batch, vae, latent_scale):
+        """
+        Encode and decode one pCT volume, return per-sample metrics.
+ 
+        Args:
+            batch:         dict with key "rsp" → (1, 1, H, W, D) in [0, 1]
+            vae:           AutoencoderKL (frozen)
+            latent_scale:  scalar tensor (e.g. 11.1560)
+ 
+        Returns:
+            dict of scalar metric values for this batch
+        """
+        gt = batch["rsp"][0:1].to(self.device)   # (1, 1, H, W, D) in [0, 1]
+        vae = vae.to(self.device)
+        z, _    = vae.encode(gt)
+        z       = z * latent_scale
+        recon   = vae.decode(z / latent_scale)
+        if isinstance(recon, tuple):
+            recon = recon[0]
+ 
+        recon = torch.clamp(recon, 0.0, 1.0)
+ 
+        ssim = self.ssim_metric(recon, gt).mean().item()
+        self.ssim_metric.reset()
+ 
+        psnr = self.psnr_metric(recon, gt).mean().item()
+        self.psnr_metric.reset()
+ 
+        gt_rsp    = gt    * self.rsp_max_scale
+        recon_rsp = recon * self.rsp_max_scale
+ 
+        mae = torch.abs(recon_rsp - gt_rsp).mean().item()
+        mse = torch.pow(recon_rsp - gt_rsp, 2).mean().item()
+ 
+        return {"SSIM": ssim, "PSNR": psnr, "MAE_RSP": mae, "MSE_RSP": mse}
+ 
+    def run(self, val_loader, vae, latent_scale, output_dir, save_interval=None):
+        """
+        Full evaluation loop over the validation set.
+ 
+        Args:
+            val_loader:    DataLoader yielding batches with "rsp" key
+            vae:           AutoencoderKL — will be set to eval()
+            latent_scale:  model.latent_scale buffer
+            output_dir:    where to save metrics pickle and visualizations
+            save_interval: how often to save a reconstruction image
+                           (defaults to ~10 times across the dataset)
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        vae.eval()
+ 
+        if save_interval is None:
+            save_interval = max(1, len(val_loader) // 10)
+ 
+        history = {"SSIM": [], "PSNR": [], "MAE_RSP": [], "MSE_RSP": []}
+ 
+        pbar = tqdm(val_loader, desc="VAE Evaluation", total=len(val_loader))
+        for i, batch in enumerate(pbar):
+            metrics = self.evaluate_batch(batch, vae, latent_scale)
+ 
+            for k, v in metrics.items():
+                history[k].append(v)
+ 
+
+ 
+            pbar.set_postfix({
+                "SSIM":    f"{np.mean(history['SSIM']):.4f}",
+                "PSNR":    f"{np.mean(history['PSNR']):.2f}",
+                "MAE_RSP": f"{np.mean(history['MAE_RSP']):.4f}",
+            })
+ 
+        self._print_summary(history)
+        self._save_metrics(history, output_dir)
+        return history
+    
+
+    @staticmethod
+    def _print_summary(history):
+        print("\n" + "=" * 50)
+        print("VAE RECONSTRUCTION QUALITY SUMMARY")
+        print("=" * 50)
+        for k, vals in history.items():
+            unit = " (RSP)" if "RSP" in k else ""
+            print(f"  {k+unit:<20}  {np.mean(vals):.4f} ± {np.std(vals):.4f}")
+        print("=" * 50)
+ 
+    @staticmethod
+    def _save_metrics(history, output_dir):
+        path = os.path.join(output_dir, "vae_evaluation_metrics.pkl")
+        with open(path, "wb") as f:
+            pickle.dump(history, f)
+        print(f"Metrics saved to {path}")
+    
+
 def visualize_ablation(resdict, output_dir, patient_idx):
     ct_cpu, gt_cpu, base_cpu, det_cpu = resdict["volumes"]
     metrics = resdict["metrics"]
     
-    # Extract the MAE values to display directly on the plot title
     base_mae = metrics["Baseline_MAE_RSP"]
     det_mae = metrics["Detector_MAE_RSP"]
     
-    # Stack them: CT | GT RSP | Baseline Prediction | Detector Prediction
     diff_map = np.abs(base_cpu - gt_cpu)
     diff_map_det = np.abs(det_cpu - gt_cpu)
     combined = np.concatenate([gt_cpu, base_cpu, det_cpu], axis=0)
 
-    fig = plt.figure(figsize=(16, 16))
+    fig = plt.figure(figsize=(16, 8))
 
     matshow3d(
         volume=combined,
@@ -380,7 +444,7 @@ def visualize_ablation(resdict, output_dir, patient_idx):
             ),
         vmin=0.0,
         vmax=1.0,
-        every_n=8,
+        every_n=16,
         frame_dim=-1,
         frames_per_row=4,
         show=False,
@@ -400,7 +464,7 @@ def visualize_ablation(resdict, output_dir, patient_idx):
             ),
         vmin=0.0,
         vmax=1.,
-        every_n=8,
+        every_n=16,
         frame_dim=-1,
         frames_per_row=4,
         show=False,
@@ -408,6 +472,68 @@ def visualize_ablation(resdict, output_dir, patient_idx):
     save_path = os.path.join(output_dir, f"flora_ablation_patient_{patient_idx}_error_maps.png")
     plt.savefig(save_path, bbox_inches="tight", dpi=150)
     plt.close(fig2) 
+
+def vis_ablataion_2(resdict,patient_idx,output_dir="article_vis", rsp_max_scale=3.2):
+    _, gt_cpu, base_cpu, hlut = resdict["volumes"]
+    
+    gt_cpu = gt_cpu/rsp_max_scale
+    base_cpu = base_cpu/rsp_max_scale
+    hlut = hlut/rsp_max_scale
+
+    diff_map = np.abs(base_cpu - gt_cpu)
+    diff_map_clinical = np.abs(hlut - gt_cpu)
+    combined = np.concatenate([gt_cpu, base_cpu], axis=0)
+
+    fig = plt.figure(figsize=(16, 12))
+    matshow3d(
+        volume=combined,
+        fig=fig,
+        title=None,
+        vmin=0.0,
+        vmax=1.0,
+        every_n=16,
+        frame_dim=-1,
+        frames_per_row=4,
+        show=False,cmap="grey"
+    )
+    fig.suptitle(
+        f"Patient {patient_idx}\n"
+        f"Row 1: Ground Truth RSP | "
+        f"Row 2: Predicted Baseline",
+        fontsize=16,fontweight='bold',y=0.80)
+    #fig.subplots_adjust(top=0.85, bottom=0.05, left=0.02, right=0.98, hspace=0.05, wspace=0.05)
+
+    save_path = os.path.join(output_dir, f"flora_ablation_patient_{patient_idx}.png")
+    plt.savefig(save_path, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+
+    fig2 = plt.figure(figsize=(12, 6))
+    combined_error = np.concatenate([diff_map], axis=0)
+    matshow3d(
+        volume=combined_error,
+        fig=fig2,
+        title=None, #(f"Patient {patient_idx}\n"f"Normalized Absolute Error"),
+        every_n=4,
+        frame_dim=-1,
+        frames_per_row=4,
+        show=False,cmap="magma",
+    )
+    fig2.suptitle(
+        f"Patient {patient_idx}\n"
+        f"Normalized Absolute Error Maps",
+        fontsize=16,fontweight='bold',y=0.95)
+    
+    colorbar = plt.colorbar(plt.cm.ScalarMappable(cmap="magma"), ax=fig2.axes, orientation='vertical')
+    colorbar.set_label('Normalized Absolute Error (RSP)', rotation=270, labelpad=15)
+    save_path = os.path.join(output_dir, f"flora_ablation_patient_{patient_idx}_error_maps.png")
+    plt.savefig(save_path, bbox_inches="tight", dpi=150)
+    plt.close(fig2)
+
+
+
+
+import os
+import matplotlib.pyplot as plt
 
 
 
@@ -445,7 +571,9 @@ def main():
         pickle.dump(metrics_dict, f)
 
 from omegaconf import OmegaConf
-def main_CT():
+
+
+def vis_for_paper():
     cfg = OmegaConf.load("config.yaml")
     vaekwgs = cfg.vae_kwgs
     velocity_kwargs = cfg.velocity_kwargs
@@ -456,19 +584,15 @@ def main_CT():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running standalone Ablation Evaluation on device: {device}")
 
-    # --- 1. Configuration & Paths ---
     output_dir = "s2_outs/eval_ablation"
     os.makedirs(output_dir, exist_ok=True)
     
-    # Update these paths to where your actual .ckpt files are!
     ckpt_baseline_path = "checkpoints/PHASE_2_CT_ONLY/last-v1.ckpt" 
     ckpt_detector_path = "checkpoints/PHASE_2_CT_DETECTOR/last-v1.ckpt"
 
     ode_steps = 10
-    cfg_value = 0.0 # Adjusted to standard 1.5, feel free to change
     method = "EULER"
 
-    # --- 2. Load Models ---
     print("Loading Baseline Model...")
     
     v1 = velocity_kwargs.copy()
@@ -485,13 +609,60 @@ def main_CT():
     sd_det = torch.load(ckpt_detector_path, map_location="cpu")["state_dict"]
     model_detector.load_state_dict(sd_det, strict=False)
 
-    # --- 3. Dataloader & Evaluator ---
-    # Ensure num_workers=4 or 8 depending on your interactive session, and batch_size=1
+    _, val_loader = get_train_loader_CT(batch_size=1, num_workers=4)
+    pbar = tqdm(val_loader, desc=f"Val | {method.upper()} | {ode_steps} steps", total=len(val_loader))
+    save_interval = max(1, len(val_loader) // 10)
+    evaluator = FlowEvaluator(device=device, ode_steps=ode_steps, rsp_max_scale=3.2)
+
+    for i, batch in enumerate(pbar):        
+        if i % save_interval == 0:
+            resDict = evaluator.compute_metrics(batch, model_baseline, model_detector, method=method,use_masking=False)
+            vis_ablataion_2(resDict, patient_idx=i)
+
+
+
+def main_CT():
+    cfg = OmegaConf.load("config.yaml")
+    vaekwgs = cfg.vae_kwgs
+    velocity_kwargs = cfg.velocity_kwargs
+    velocity_kwargs.in_channels = 4
+    velocity_kwargs.with_conditioning = True
+    velocity_kwargs.cross_attention_dim = 256
+    ct_cfg = cfg.ct_train_params
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Running standalone Ablation Evaluation on device: {device}")
+
+    output_dir = "s2_outs/eval_ablation"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    ckpt_baseline_path = "checkpoints/PHASE_2_CT_ONLY/last-v1.ckpt" 
+    ckpt_detector_path = "checkpoints/PHASE_2_CT_DETECTOR/last-v1.ckpt"
+
+    ode_steps = 10
+    cfg_value = 0.0 
+    method = "EULER"
+
+    print("Loading Baseline Model...")
+    
+    v1 = velocity_kwargs.copy()
+    v1["with_conditioning"] = False
+    v1.pop('cross_attention_dim', None)  # Remove if exists since baseline doesn't use it
+
+    model_baseline = FLORA_CT(vaekwgs=vaekwgs, velocity_kwargs=v1,lr=ct_cfg.lr,use_detector_context=False).to(device)
+    sd_base = torch.load(ckpt_baseline_path, map_location="cpu")["state_dict"]
+    model_baseline.load_state_dict(sd_base, strict=False)
+    
+    print("Loading Detector Model...")
+
+    model_detector = FLORA_CT(vaekwgs=vaekwgs, velocity_kwargs=velocity_kwargs,lr=ct_cfg.lr,use_detector_context=True).to(device)
+    sd_det = torch.load(ckpt_detector_path, map_location="cpu")["state_dict"]
+    model_detector.load_state_dict(sd_det, strict=False)
+
+    
     _, val_loader = get_train_loader_CT(batch_size=1, num_workers=4)
     
     evaluator = FlowEvaluator(device=device, ode_steps=ode_steps, rsp_max_scale=3.2)
 
-    # --- 4. Metrics Tracking Dictionary ---
     history = {
         "Baseline_SSIM": [], "Detector_SSIM": [],
         "Baseline_PSNR": [], "Detector_PSNR": [],
@@ -499,32 +670,24 @@ def main_CT():
         "HLUT_SSIM": [], "HLUT_PSNR": [], "HLUT_MAE_RSP": []
     }
 
-    # --- 5. Evaluation Loop ---
     pbar = tqdm(val_loader, desc=f"Val | {method.upper()} | {ode_steps} steps", total=len(val_loader))
     save_interval = max(1, len(val_loader) // 10)
-
+    patient_index = 0
     for i, batch in enumerate(pbar):
-        # Compute everything
-        resDict = evaluator.compute_metrics(batch, model_baseline, model_detector, method=method,use_masking=False)
+        resDict = evaluator.compute_metrics(batch, model_baseline, model_detector, method=method,use_masking=True)
         
-        # Save snapshot
         if i % save_interval == 0:
-            visualize_ablation(resDict, output_dir, patient_idx=i)
+            patient_index += 1
+            visualize_ablation(resDict, output_dir, patient_idx=patient_index)
             
-        # Accumulate metrics
         for k in history.keys():
             history[k].append(resDict["metrics"][k])
             
-        # Live dashboard update (Focusing on the physical MAE error!)
         pbar.set_postfix({
-            "Base_SSIM": f"{np.mean(history['Baseline_SSIM']):.4f}",
-            "Det_SSIM": f"{np.mean(history['Detector_SSIM']):.4f}",
-            "CLINICAL_SSIM": f"{np.mean(history['HLUT_SSIM']):.4f}",
-            "BASE_MAE": f"{np.mean(history['Baseline_MAE_RSP']):.4f}",
-            "CLINICAL_MAE": f"{np.mean(history['HLUT_MAE_RSP']):.4f}"
+            "Avg Baseline MAE": f"{np.mean(history['Baseline_MAE_RSP']):.4f}",
+            "Avg HLUT MAE": f"{np.mean(history['HLUT_MAE_RSP']):.4f}"
         })
 
-    # --- 6. Save Final Metrics to Disk ---
     pickle_name = f"ablation_metrics_cfg{cfg_value}_{method}_{ode_steps}steps.pkl"
     with open(os.path.join(output_dir, pickle_name), "wb") as f:
         pickle.dump(history, f)
@@ -541,8 +704,17 @@ def main_CT():
     print("Final Average Baseline PSNR: {:.2f} dB".format(np.mean(history['Baseline_PSNR'])))
     print("Final Average Detector PSNR: {:.2f} dB".format(np.mean(history['Detector_PSNR'])))
     print("Final Average Clinical HLUT PSNR: {:.2f} dB".format(np.mean(history['HLUT_PSNR'])))
+    print("\n\n")
 
-    
+from FLORA.blocks import configure_vae
+
+def main_vae():
+    cfg = OmegaConf.load("config.yaml")
+    vaekwgs = cfg.vae_kwgs
+    vae = configure_vae(vaekwgs)
+    _, val_loader = get_train_loader_stage2(batch_size=1, num_workers=1)
+    evaluator = VAEEvaluator(device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), rsp_max_scale=3.2)
+    history = evaluator.run(val_loader,vae,latent_scale=3.2,output_dir="s2_outs/vae_eval",save_interval=None)
 
 if __name__ == "__main__":
     print('Starting Evaluation Script...')

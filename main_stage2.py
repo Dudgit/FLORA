@@ -72,17 +72,16 @@ def train_ct_only():
 
 
 def train_ct_detector():
-    run_name = "PHASE_2_CT_DETECTOR_MOD"
+    run_name = "PHASE_2_CT_ONLY_WEIGHTED_LOSS"
     cfg = OmegaConf.load("config.yaml")
     vaekwgs = cfg.vae_kwgs
     velocity_kwargs = cfg.velocity_kwargs
     ct_cfg = cfg.ct_train_params
     detectorproj_kwargs = cfg.detectorproj_kwargs
-    model = FLORA_CT_changedBlock(vaekwgs=vaekwgs, velocity_kwargs=velocity_kwargs,lr=ct_cfg.lr,use_detector_context=True,detectorproj_kwargs=detectorproj_kwargs)
+    model = FLORA_CT_changedBlock(vaekwgs=vaekwgs, velocity_kwargs=velocity_kwargs,lr=ct_cfg.lr,use_detector_context=False,detectorproj_kwargs=detectorproj_kwargs)
     train_loader, val_loader = get_train_loader_CT(batch_size=8, num_workers=8)
     val_callback = ModelCheckpoint(monitor='val/flow_matching_loss',dirpath=os.path.join("checkpoints", run_name),filename='best_val_flow', save_top_k=1,mode='min', enable_version_counter=False )
     last_callback = ModelCheckpoint(dirpath=os.path.join("checkpoints", run_name),filename='last',save_last=True)
-    #vis_callback = CTtoPCTVisualizationCallback(every_n_epochs=5)
     wandb_logger = WandbLogger(log_model=True, project="FLOW", name=run_name.replace("PHASE_2_",""),entity="FLORAAI",save_dir="/tmp")
     trainer = pl.Trainer(
         max_epochs=150,precision="bf16-mixed", callbacks=[val_callback, last_callback], logger=wandb_logger,accelerator='gpu', 
